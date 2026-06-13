@@ -8,9 +8,9 @@
 'use strict';
 
 /* ---------- Configuración del matching (ajustable) ---------- */
-const UMBRAL_VERDE   = 0.30; // score Fuse <= => coincidencia clara
-const SEPARACION_MIN = 0.16; // distancia mínima al 2º candidato para auto
-const UMBRAL_AMARILLO= 0.55; // score Fuse <= => dudoso (muestra candidatos)
+const UMBRAL_VERDE   = 0.38; // score Fuse <= => coincidencia clara
+const SEPARACION_MIN = 0.12; // distancia mínima al 2º candidato para auto
+const UMBRAL_AMARILLO= 0.62; // score Fuse <= => dudoso (muestra candidatos)
 // Por encima de UMBRAL_AMARILLO => rojo (sin coincidencia)
 
 const GRUPOS = ['AI', 'B', 'C', 'V'];
@@ -204,6 +204,27 @@ async function getWorker(){
   return ocrWorker;
 }
 
+/* Mejora el fotograma COMPLETO para el OCR (sin recortar, para no perder
+   ni el nombre ni el número del documento). */
+function preprocesar(src){
+  const escala = (src.width < 1000) ? 1.6 : 1;     // amplía si la cámara da poca resolución
+  const out = document.createElement('canvas');
+  out.width  = Math.round(src.width  * escala);
+  out.height = Math.round(src.height * escala);
+  const ctx = out.getContext('2d');
+  ctx.drawImage(src, 0, 0, out.width, out.height);
+  const img = ctx.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4){
+    let g = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]; // gris
+    g = (g - 128) * 1.45 + 128;                             // realce de contraste
+    g = g < 0 ? 0 : (g > 255 ? 255 : g);
+    d[i] = d[i+1] = d[i+2] = g;
+  }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
 async function capturarYProcesar(){
   const video = $('#video');
   if (!video.videoWidth){ toast('La cámara aún no está lista.'); return; }
@@ -217,8 +238,10 @@ async function capturarYProcesar(){
   let texto = '';
   try {
     const worker = await getWorker();
-    const { data } = await worker.recognize(canvas);
+    const proc = preprocesar(canvas);          // recorte + ampliado + gris/contraste
+    const { data } = await worker.recognize(proc);
     texto = data.text || '';
+    console.log('[OCR] texto leído:\n' + texto);
   } catch (e) {
     setOcr(); toast('Fallo de OCR: ' + e.message, 4000); return;
   } finally {
@@ -229,58 +252,69 @@ async function capturarYProcesar(){
   analizarTexto(texto);
 }
 
-/* ---------- Extracción de nombre / ID del texto OCR ---------- */
-function extraerCandidatoTexto(texto){
+/* ---------- Extracción y construcción de consultas ---------- */
+const RUIDO_DNI = ['dni','nif','documento','nacional','identidad','espana','espa','reino','de','del','apellidos','apellido','nombre','sexo','m','f','nacionalidad','esp','validez','soporte','can','idesp','equipo','fecha','nacimiento'];
+
+function lineasUtiles(texto){
   const lineas = texto.split(/\n+/)
     .map(l => l.replace(/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]/g, ' ').replace(/\s+/g, ' ').trim())
     .filter(l => l.replace(/\s/g, '').length >= 3);
-  // descarta etiquetas típicas del DNI
-  const ruido = ['dni','documento','nacional','identidad','espana','espa','reino','apellidos','nombre','sexo','nacionalidad','validez','soporte','can','idesp'];
-  const utiles = lineas.filter(l => {
+  return lineas.filter(l => {
     const nl = norm(l);
-    return !ruido.some(r => nl === r || nl.startsWith(r + ' '));
+    return !RUIDO_DNI.some(r => nl === r || nl.startsWith(r + ' '));
   });
-  // las 1-3 líneas alfabéticas más largas suelen ser apellidos + nombre
-  utiles.sort((a, b) => b.length - a.length);
-  return utiles.slice(0, 3).join(' ').trim();
+}
+function construirQueries(texto){
+  const utiles = lineasUtiles(texto);
+  const porLong = [...utiles].sort((a, b) => b.length - a.length);
+  const q = new Set();
+  if (porLong.length) q.add(porLong.slice(0, 3).join(' ')); // varias líneas juntas
+  porLong.slice(0, 4).forEach(l => q.add(l));               // cada línea suelta
+  const tokens = utiles.join(' ').split(' ').filter(t => t.length >= 3);
+  if (tokens.length) q.add(tokens.join(' '));               // todos los tokens
+  return [...q].map(s => norm(s)).filter(Boolean);
 }
 function extraerIds(texto){
   return (texto.match(/\d{5,}/g) || []).map(soloDigitos);
 }
+function buscarMejores(queries){
+  const mapa = new Map();
+  for (const q of queries){
+    fuse.search(q).forEach(r => {
+      const k = `${r.item.grupo}|${r.item.usuario}|${r.item.id}|${r.item.nombre}|${r.item.apellidos}`;
+      if (!mapa.has(k) || r.score < mapa.get(k).score) mapa.set(k, r);
+    });
+  }
+  return [...mapa.values()].sort((a, b) => a.score - b.score);
+}
 
 /* ---------- Análisis y decisión (semáforo) ---------- */
 function analizarTexto(texto){
-  if (!alumnos.length){ mostrarRojo('Sin alumnos', 'Carga los CSV primero.', ''); return; }
+  if (!alumnos.length){ mostrarRojo('Sin alumnos', 'Carga los CSV primero.', texto); return; }
 
-  // 1) Coincidencia por Número de ID (señal fuerte)
-  const ids = extraerIds(texto);
-  for (const idTok of ids){
+  // 1) Coincidencia fuerte por Número de ID
+  for (const idTok of extraerIds(texto)){
     const exactos = alumnos.filter(a => a._id && a._id === idTok);
-    if (exactos.length === 1){
-      decidir(exactos[0], 98, 'auto'); return;
-    }
+    if (exactos.length === 1){ decidir(exactos[0], 98, 'auto'); return; }
   }
 
-  // 2) Coincidencia difusa por nombre
-  const query = extraerCandidatoTexto(texto);
-  if (!query){ mostrarRojo('Sin lectura', 'No se ha podido leer texto del documento.', texto); return; }
+  // 2) Coincidencia difusa por nombre (varias consultas)
+  const queries = construirQueries(texto);
+  if (!queries.length){ mostrarRojo('Sin lectura', 'No se ha leído texto del documento.', texto); return; }
 
-  const res = fuse.search(query).slice(0, 5);
-  if (!res.length){ mostrarRojo('Sin coincidencia', 'No hay ningún alumno que coincida.', query); return; }
+  const res = buscarMejores(queries);
+  if (!res.length){ mostrarRojo('Sin coincidencia', 'No encaja con ningún alumno.', texto); return; }
 
-  const best = res[0];
-  const second = res[1];
+  const best = res[0], second = res[1];
   const conf = Math.round((1 - best.score) * 100);
-
-  const claro = best.score <= UMBRAL_VERDE &&
-                (!second || (second.score - best.score) >= SEPARACION_MIN);
+  const claro = best.score <= UMBRAL_VERDE && (!second || (second.score - best.score) >= SEPARACION_MIN);
 
   if (claro){
     decidir(best.item, conf, 'auto');
   } else if (best.score <= UMBRAL_AMARILLO){
-    mostrarAmarillo(res.slice(0, 3));
+    mostrarAmarillo(res.slice(0, 3), texto);
   } else {
-    mostrarRojo('Sin coincidencia', 'La lectura no encaja con ningún alumno.', query);
+    mostrarRojo('Sin coincidencia', `Mejor aproximación: ${best.item.nombre} ${best.item.apellidos} (${conf}%)`, texto);
   }
 }
 
@@ -324,6 +358,17 @@ function abrirResultado(clase){
 }
 function cerrarResultado(){ $('#resultado').hidden = true; }
 
+/* Muestra el texto crudo del OCR (diagnóstico). Aparece SIEMPRE. */
+function mostrarDebug(texto){
+  const t = (texto || '').trim();
+  const cont = $('#resCandidatos');
+  cont.hidden = false;
+  const box = document.createElement('div');
+  box.className = 'ocr-debug';
+  box.textContent = 'Texto leído por el OCR:\n' + (t || '(no se leyó texto)');
+  cont.appendChild(box);
+}
+
 function mostrarVerde(al, conf){
   abrirResultado('verde');
   $('#resIcon').textContent = '✓';
@@ -333,7 +378,7 @@ function mostrarVerde(al, conf){
   beepOk(); vibrar([60, 40, 120]);
 }
 
-function mostrarAmarillo(resultados){
+function mostrarAmarillo(resultados, textoOcr){
   abrirResultado('amarillo');
   $('#resIcon').textContent = '?';
   $('#resTitulo').textContent = 'Coincidencia dudosa';
@@ -357,6 +402,7 @@ function mostrarAmarillo(resultados){
     });
     cont.appendChild(div);
   });
+  mostrarDebug(textoOcr);
   beepOk(false); vibrar([120]);
 }
 
@@ -373,6 +419,7 @@ function mostrarRojo(titulo, meta, debug){
   b.innerHTML = `<div class="c-nombre">🔎 Buscar manualmente</div>`;
   b.addEventListener('click', () => { cerrarResultado(); abrirManual(); });
   cont.appendChild(b);
+  mostrarDebug(debug);
   beepError(); vibrar([200, 80, 200]);
 }
 
