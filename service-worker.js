@@ -6,7 +6,7 @@
    - Recursos externos (CDN: PapaParse, Fuse, Tesseract y su modelo):
      CACHE-FIRST, porque son estables/versionados y pesados. */
 
-const CACHE = 'asistencia-v4';
+const CACHE = 'asistencia-v5';
 
 const SHELL = [
   './',

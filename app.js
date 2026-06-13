@@ -204,22 +204,20 @@ async function getWorker(){
   return ocrWorker;
 }
 
-/* Recorta la zona central (documento), la amplía y mejora para el OCR */
+/* Mejora el fotograma COMPLETO para el OCR (sin recortar, para no perder
+   ni el nombre ni el número del documento). */
 function preprocesar(src){
-  const sw = src.width, sh = src.height;
-  const cx = Math.round(sw * 0.05), cy = Math.round(sh * 0.18);
-  const cw = Math.round(sw * 0.90), ch = Math.round(sh * 0.64);
-  const escala = (cw < 1100) ? 2 : 1.4;            // ampliar para mejorar la lectura
+  const escala = (src.width < 1000) ? 1.6 : 1;     // amplía si la cámara da poca resolución
   const out = document.createElement('canvas');
-  out.width  = Math.round(cw * escala);
-  out.height = Math.round(ch * escala);
+  out.width  = Math.round(src.width  * escala);
+  out.height = Math.round(src.height * escala);
   const ctx = out.getContext('2d');
-  ctx.drawImage(src, cx, cy, cw, ch, 0, 0, out.width, out.height);
+  ctx.drawImage(src, 0, 0, out.width, out.height);
   const img = ctx.getImageData(0, 0, out.width, out.height);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4){
     let g = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]; // gris
-    g = (g - 128) * 1.4 + 128;                              // realce de contraste
+    g = (g - 128) * 1.45 + 128;                             // realce de contraste
     g = g < 0 ? 0 : (g > 255 ? 255 : g);
     d[i] = d[i+1] = d[i+2] = g;
   }
