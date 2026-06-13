@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="theme-color" content="#0f3d3e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Asistencia" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="styles.css" />
+  <title>Control de Asistencia Docente</title>
+
+  <!-- Librerías locales en navegador (se cachean en el service worker tras la 1ª carga) -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+</head>
+<body>
+
+  <!-- ====== CABECERA ====== -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot g"></span><span class="dot y"></span><span class="dot r"></span>
+      <strong>Asistencia</strong>
+    </div>
+    <div class="topbar-right">
+      <span id="dbCount" class="pill">0 alumnos</span>
+      <button id="navAsistencia" class="icon-btn" title="Ver registro" aria-label="Ver registro">📋</button>
+      <button id="navConfig" class="icon-btn" title="Datos" aria-label="Datos">⚙️</button>
+    </div>
+  </header>
+
+  <!-- ====== PANTALLA 1: CARGA DE CSV ====== -->
+  <section id="screen-carga" class="screen active">
+    <div class="card">
+      <h1>Cargar grupos</h1>
+      <p class="muted">Carga un CSV por grupo. Columnas esperadas:
+        <code>Nombre, Apellido(s), Nombre de usuario, Número de ID, Dirección de correo</code>.
+        Las cabeceras se detectan de forma flexible.</p>
+
+      <div class="grupos-grid">
+        <label class="grupo-loader" data-grupo="AI">
+          <span class="grupo-tag">AI</span>
+          <input type="file" accept=".csv,text/csv" data-grupo="AI" />
+          <span class="grupo-state" data-state="AI">Sin cargar</span>
+        </label>
+        <label class="grupo-loader" data-grupo="B">
+          <span class="grupo-tag">B</span>
+          <input type="file" accept=".csv,text/csv" data-grupo="B" />
+          <span class="grupo-state" data-state="B">Sin cargar</span>
+        </label>
+        <label class="grupo-loader" data-grupo="C">
+          <span class="grupo-tag">C</span>
+          <input type="file" accept=".csv,text/csv" data-grupo="C" />
+          <span class="grupo-state" data-state="C">Sin cargar</span>
+        </label>
+        <label class="grupo-loader" data-grupo="V">
+          <span class="grupo-tag">V</span>
+          <input type="file" accept=".csv,text/csv" data-grupo="V" />
+          <span class="grupo-state" data-state="V">Sin cargar</span>
+        </label>
+      </div>
+
+      <div class="row">
+        <button id="btnIrEscaneo" class="btn primary" disabled>Empezar a pasar lista</button>
+        <button id="btnBorrarDatos" class="btn ghost">Borrar todo</button>
+      </div>
+      <p class="muted small">Los datos quedan guardados en este dispositivo. Si recargas la app, no hace falta volver a cargar los CSV.</p>
+    </div>
+
+    <div class="card warn-rgpd">
+      <h2>⚠️ Aviso RGPD / LOPDGDD</h2>
+      <p class="small">El tratamiento de imágenes de documentos de identidad es un dato personal sensible. Lee las advertencias completas en el README antes de usar esta app con alumnos reales. Esta herramienta <strong>no almacena la imagen del documento</strong> y procesa todo localmente.</p>
+    </div>
+  </section>
+
+  <!-- ====== PANTALLA 2: ESCANEO ====== -->
+  <section id="screen-escaneo" class="screen">
+    <div class="scan-stage">
+      <video id="video" playsinline muted autoplay></video>
+      <div class="scan-frame"></div>
+      <canvas id="canvas" hidden></canvas>
+      <div id="ocrStatus" class="ocr-status" hidden></div>
+    </div>
+    <div class="scan-controls">
+      <button id="btnBuscarManual" class="btn ghost">🔎 Manual</button>
+      <button id="btnCapturar" class="btn shutter" aria-label="Capturar">●</button>
+      <button id="btnCambiarCam" class="btn ghost">🔄 Cámara</button>
+    </div>
+  </section>
+
+  <!-- ====== OVERLAY DE RESULTADO (semáforo) ====== -->
+  <div id="resultado" class="resultado" hidden>
+    <div class="resultado-inner">
+      <div id="resIcon" class="res-icon"></div>
+      <div id="resTitulo" class="res-titulo"></div>
+      <div id="resNombre" class="res-nombre"></div>
+      <div id="resMeta" class="res-meta"></div>
+
+      <!-- Candidatos (modo dudoso) -->
+      <div id="resCandidatos" class="candidatos" hidden></div>
+
+      <div class="res-actions">
+        <button id="btnSeguir" class="btn light">Siguiente alumno</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== PANTALLA 3: BÚSQUEDA MANUAL ====== -->
+  <section id="screen-manual" class="screen">
+    <div class="card">
+      <h1>Búsqueda manual</h1>
+      <input id="manualInput" class="text-input" type="text" inputmode="search"
+             placeholder="Escribe nombre o apellidos…" autocomplete="off" />
+      <div id="manualResultados" class="lista-resultados"></div>
+      <button id="btnCerrarManual" class="btn ghost full">Volver a la cámara</button>
+    </div>
+  </section>
+
+  <!-- ====== PANTALLA 4: REGISTRO DE ASISTENCIA ====== -->
+  <section id="screen-asistencia" class="screen">
+    <div class="card">
+      <div class="row between">
+        <h1>Registro</h1>
+        <span id="asistCount" class="pill">0</span>
+      </div>
+      <div class="row">
+        <select id="filtroFecha" class="text-input"></select>
+      </div>
+      <div id="listaAsistencia" class="lista-asistencia"></div>
+      <div class="row">
+        <button id="btnExportar" class="btn primary">Exportar CSV</button>
+        <button id="btnBorrarDia" class="btn ghost">Borrar día</button>
+      </div>
+      <button id="btnVolverEscaneo" class="btn ghost full">Volver a la cámara</button>
+    </div>
+  </section>
+
+  <!-- ====== TOAST ====== -->
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
