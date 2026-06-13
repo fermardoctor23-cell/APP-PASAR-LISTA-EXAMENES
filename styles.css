@@ -23,6 +23,8 @@
 }
 
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+/* El atributo hidden debe ganar SIEMPRE a cualquier display del CSS */
+[hidden]{display:none !important;}
 html,body{margin:0;height:100%;}
 body{
   background:var(--bg);
